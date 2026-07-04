@@ -1,0 +1,9 @@
+Package: cevamPhase2Code
+Type: Project
+Title: Code for CEVAM Phase II Monitoring Simulations
+Version: 0.1.0
+Authors@R: person("Masahiro", "Kojima", email = "mkojima263@g.chuo-u.ac.jp", role = c("aut", "cre"))
+Description: Boundary generation and simulation code for likelihood-ratio e-value monitoring in early-phase oncology trials.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Imports: openxlsx
