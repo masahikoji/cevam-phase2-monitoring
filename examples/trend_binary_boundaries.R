@@ -1,22 +1,24 @@
-# cevam_trend_binary_boundaries.R
+# trend_binary_boundaries.R
 #
-# Standalone R program to compute CEVAM binary monitoring boundaries
-# for the TREND trial setting:
+# Standalone R program to compute the CEVAM boundaries used for the
+# TREND trial re-analysis in the manuscript.
+#
+# This script follows the manuscript definitions:
+#   CEVAM-NT: beta is fixed at beta0, and alpha_eff is calibrated.
+#   CEVAM-T : alpha_eff and beta are jointly calibrated.
+#
+# The calibration uses exact binomial operating characteristics over the
+# specified planned looks and the same selection rule as the simulation code:
+#   1) keep candidates with planned-look type I error <= alpha_star + tolerance;
+#   2) choose the candidate closest to alpha_star;
+#   3) break ties by larger power, smaller EN under p0, and larger PET under p0.
+#
+# Default TREND settings:
 #   p0 = 0.41, p1 = 0.56, maximum sample size N = 65
 #   retrospective reported look: n = 44, x = 30
+#   looks used for re-analysis: 44 and 65
 #
-# It computes:
-#   1) Fixed-threshold CEVAM boundaries:
-#        efficacy threshold = 1 / alpha
-#        futility threshold = 1 / beta
-#   2) Planned-look calibrated CEVAM boundaries:
-#        thresholds are calibrated over the specified planned looks
-#        using exact binomial probabilities.
-#
-# Default looks are c(44, 65), corresponding to a retrospective look
-# at the reported efficacy-evaluable result and the maximum sample size.
-# For comparison with the TREND protocol-specified interim look, change
-# looks to c(48, 65).
+# To compare with the protocol-specified interim look, change looks to c(48, 65).
 
 # -----------------------------
 # User settings
@@ -24,14 +26,21 @@
 
 p0 <- 0.41
 p1 <- 0.56
-alpha <- 0.05
-beta  <- 0.20
+alpha_star <- 0.05
+beta0 <- 0.20
 
-N_max <- 65
-looks <- c(44, 65)
+type1_tolerance <- 0.005
 
-reported_n <- 44
-reported_x <- 30
+N_max <- 65L
+looks <- c(44L, 65L)
+
+reported_n <- 44L
+reported_x <- 30L
+
+alpha_eff_grid <- seq(0.01, 1.00, by = 0.01)
+beta_grid <- seq(0.01, 1.00, by = 0.01)
+
+output_prefix <- "cevam_trend"
 
 # -----------------------------
 # Core likelihood-ratio functions
@@ -45,274 +54,332 @@ log_lr_fut <- function(x, n, p0, p1) {
   x * log(p0 / p1) + (n - x) * log((1 - p0) / (1 - p1))
 }
 
-eff_boundary_at_n <- function(n, p0, p1, A_eff) {
+eff_boundary_at_n <- function(n, p0, p1, alpha_eff) {
   xs <- 0:n
-  hit <- xs[log_lr_eff(xs, n, p0, p1) >= log(A_eff)]
-  if (length(hit) == 0L) return(NA_integer_)
+  hit <- xs[log_lr_eff(xs, n, p0, p1) >= log(1 / alpha_eff)]
+  if (length(hit) == 0L) return(n + 1L)
   min(hit)
 }
 
-fut_boundary_at_n <- function(n, p0, p1, A_fut) {
+fut_boundary_at_n <- function(n, p0, p1, beta) {
   xs <- 0:n
-  hit <- xs[log_lr_fut(xs, n, p0, p1) >= log(A_fut)]
-  if (length(hit) == 0L) return(NA_integer_)
+  hit <- xs[log_lr_fut(xs, n, p0, p1) >= log(1 / beta)]
+  if (length(hit) == 0L) return(-1L)
   max(hit)
 }
 
-make_boundary_table <- function(looks, p0, p1, A_eff, A_fut, label) {
-  out <- data.frame(
-    method = label,
-    look_n = looks,
-    futility_boundary = vapply(
-      looks,
-      fut_boundary_at_n,
-      integer(1),
-      p0 = p0,
-      p1 = p1,
-      A_fut = A_fut
-    ),
-    efficacy_boundary = vapply(
-      looks,
-      eff_boundary_at_n,
-      integer(1),
-      p0 = p0,
-      p1 = p1,
-      A_eff = A_eff
-    ),
+build_cevam_binary_design <- function(method, looks, p0, p1, alpha_star,
+                                      alpha_eff, beta) {
+  futility_le <- vapply(
+    looks,
+    fut_boundary_at_n,
+    integer(1),
+    p0 = p0,
+    p1 = p1,
+    beta = beta
+  )
+  efficacy_ge <- vapply(
+    looks,
+    eff_boundary_at_n,
+    integer(1),
+    p0 = p0,
+    p1 = p1,
+    alpha_eff = alpha_eff
+  )
+  names(futility_le) <- names(efficacy_ge) <- as.character(looks)
+
+  list(
+    method = method,
+    alpha_star = alpha_star,
+    alpha_eff = alpha_eff,
+    beta = beta,
+    futility_le = futility_le,
+    efficacy_ge = efficacy_ge,
+    final_reject_if_not_futile = FALSE
+  )
+}
+
+make_boundary_table <- function(design, looks) {
+  data.frame(
+    method = design$method,
+    look_n = as.integer(looks),
+    futility_boundary = as.integer(design$futility_le[as.character(looks)]),
+    efficacy_boundary = as.integer(design$efficacy_ge[as.character(looks)]),
+    alpha_star = design$alpha_star,
+    alpha_eff = design$alpha_eff,
+    beta = design$beta,
     stringsAsFactors = FALSE
   )
-  out$decision_rule <- paste0(
-    "Stop for futility if x <= ", out$futility_boundary,
-    "; stop for efficacy if x >= ", out$efficacy_boundary,
-    "; otherwise continue."
-  )
-  out
 }
 
 # -----------------------------
 # Exact operating characteristics
 # -----------------------------
 
-prob_ever_eff <- function(looks, p, p0, p1, A_eff) {
+classify_decision <- function(n, x, design, N) {
+  key <- as.character(n)
+  e_bd <- design$efficacy_ge[key]
+  f_bd <- design$futility_le[key]
+
+  if (!is.na(e_bd) && x >= e_bd) return("efficacy")
+  if (!is.na(f_bd) && x <= f_bd) return("futility")
+  if (n == N) {
+    if (isTRUE(design$final_reject_if_not_futile)) return("efficacy")
+    return("no_reject")
+  }
+  "continue"
+}
+
+exact_oc_binary <- function(truth_p, design, looks, N) {
   looks <- sort(unique(as.integer(looks)))
-  dist <- c("0" = 1)
+  if (tail(looks, 1L) != N) {
+    stop("The final look must equal N.", call. = FALSE)
+  }
+
   prev_n <- 0L
-  hit_prob <- 0
+  state <- 1
+  pr_reject <- 0
+  pr_etf <- 0
+  pr_ete <- 0
+  en <- 0
 
   for (n in looks) {
-    inc <- n - prev_n
-    new_dist <- numeric(0)
+    m <- n - prev_n
+    pmf <- dbinom(0:m, size = m, prob = truth_p)
+    dist <- rep(0, n + 1L)
 
-    for (x_prev_name in names(dist)) {
-      x_prev <- as.integer(x_prev_name)
-      pr_prev <- dist[[x_prev_name]]
-
-      y <- 0:inc
-      pr_y <- dbinom(y, size = inc, prob = p)
-      x_new <- x_prev + y
-
-      for (j in seq_along(x_new)) {
-        key <- as.character(x_new[j])
-        new_dist[key] <- ifelse(is.na(new_dist[key]), 0, new_dist[key]) +
-          pr_prev * pr_y[j]
-      }
+    for (x0 in 0:prev_n) {
+      pr0 <- state[x0 + 1L]
+      if (pr0 == 0) next
+      idx <- x0 + (0:m) + 1L
+      dist[idx] <- dist[idx] + pr0 * pmf
     }
 
-    e_bd <- eff_boundary_at_n(n, p0, p1, A_eff)
-    cont <- numeric(0)
+    next_state <- if (n < N) rep(0, n + 1L) else numeric(0)
+    for (x in 0:n) {
+      px <- dist[x + 1L]
+      if (px == 0) next
 
-    for (key in names(new_dist)) {
-      x <- as.integer(key)
-      pr <- new_dist[[key]]
-      if (!is.na(e_bd) && x >= e_bd) {
-        hit_prob <- hit_prob + pr
+      dec <- classify_decision(n, x, design, N)
+      if (dec == "efficacy") {
+        pr_reject <- pr_reject + px
+        en <- en + n * px
+        if (n < N) pr_ete <- pr_ete + px
+      } else if (dec == "futility") {
+        en <- en + n * px
+        if (n < N) pr_etf <- pr_etf + px
+      } else if (dec == "no_reject") {
+        en <- en + n * px
       } else {
-        cont[key] <- pr
+        next_state[x + 1L] <- next_state[x + 1L] + px
       }
     }
 
-    dist <- cont
+    state <- next_state
     prev_n <- n
   }
 
-  hit_prob
+  list(
+    reject = pr_reject,
+    ETF = pr_etf,
+    ETE = pr_ete,
+    PET = pr_etf + pr_ete,
+    EN = en
+  )
 }
 
-prob_ever_fut <- function(looks, p, p0, p1, A_fut) {
-  looks <- sort(unique(as.integer(looks)))
-  dist <- c("0" = 1)
-  prev_n <- 0L
-  hit_prob <- 0
+make_candidate <- function(method, p0, p1, looks, N, alpha_star,
+                           alpha_eff, beta) {
+  design <- build_cevam_binary_design(
+    method = method,
+    looks = looks,
+    p0 = p0,
+    p1 = p1,
+    alpha_star = alpha_star,
+    alpha_eff = alpha_eff,
+    beta = beta
+  )
+  list(
+    design = design,
+    oc_null = exact_oc_binary(p0, design, looks, N),
+    oc_alt = exact_oc_binary(p1, design, looks, N)
+  )
+}
 
-  for (n in looks) {
-    inc <- n - prev_n
-    new_dist <- numeric(0)
-
-    for (x_prev_name in names(dist)) {
-      x_prev <- as.integer(x_prev_name)
-      pr_prev <- dist[[x_prev_name]]
-
-      y <- 0:inc
-      pr_y <- dbinom(y, size = inc, prob = p)
-      x_new <- x_prev + y
-
-      for (j in seq_along(x_new)) {
-        key <- as.character(x_new[j])
-        new_dist[key] <- ifelse(is.na(new_dist[key]), 0, new_dist[key]) +
-          pr_prev * pr_y[j]
-      }
-    }
-
-    f_bd <- fut_boundary_at_n(n, p0, p1, A_fut)
-    cont <- numeric(0)
-
-    for (key in names(new_dist)) {
-      x <- as.integer(key)
-      pr <- new_dist[[key]]
-      if (!is.na(f_bd) && x <= f_bd) {
-        hit_prob <- hit_prob + pr
-      } else {
-        cont[key] <- pr
-      }
-    }
-
-    dist <- cont
-    prev_n <- n
+choose_cevam_candidate <- function(candidates, alpha_star,
+                                   type1_tolerance = 0.005,
+                                   label = "CEVAM") {
+  if (length(candidates) == 0L) {
+    stop("No candidate provided for ", label, ".", call. = FALSE)
   }
 
-  hit_prob
+  keep <- vapply(
+    candidates,
+    function(z) z$oc_null$reject <= alpha_star + type1_tolerance + 1e-12,
+    logical(1)
+  )
+  candidates <- candidates[keep]
+
+  if (length(candidates) == 0L) {
+    stop(
+      "No candidate controlled type I error within tolerance for ", label, ".",
+      call. = FALSE
+    )
+  }
+
+  type1 <- vapply(candidates, function(z) z$oc_null$reject, numeric(1))
+  dist <- abs(type1 - alpha_star)
+  candidates <- candidates[abs(dist - min(dist)) <= 1e-12]
+  if (length(candidates) == 1L) return(candidates[[1]])
+
+  power <- vapply(candidates, function(z) z$oc_alt$reject, numeric(1))
+  candidates <- candidates[abs(power - max(power)) <= 1e-12]
+  if (length(candidates) == 1L) return(candidates[[1]])
+
+  en0 <- vapply(candidates, function(z) z$oc_null$EN, numeric(1))
+  candidates <- candidates[abs(en0 - min(en0)) <= 1e-12]
+  if (length(candidates) == 1L) return(candidates[[1]])
+
+  pet0 <- vapply(candidates, function(z) z$oc_null$PET, numeric(1))
+  candidates[[which.max(pet0)]]
+}
+
+calibrate_cevam_nt <- function(p0, p1, looks, N, alpha_star, beta0,
+                               alpha_eff_grid, type1_tolerance) {
+  candidates <- lapply(
+    alpha_eff_grid,
+    function(ae) make_candidate(
+      method = "CEVAM-NT",
+      p0 = p0,
+      p1 = p1,
+      looks = looks,
+      N = N,
+      alpha_star = alpha_star,
+      alpha_eff = ae,
+      beta = beta0
+    )
+  )
+  choose_cevam_candidate(
+    candidates,
+    alpha_star = alpha_star,
+    type1_tolerance = type1_tolerance,
+    label = "CEVAM-NT"
+  )
+}
+
+calibrate_cevam_t <- function(p0, p1, looks, N, alpha_star,
+                              alpha_eff_grid, beta_grid, type1_tolerance) {
+  grid <- expand.grid(
+    alpha_eff = alpha_eff_grid,
+    beta = beta_grid,
+    KEEP.OUT.ATTRS = FALSE
+  )
+
+  candidates <- vector("list", nrow(grid))
+  for (i in seq_len(nrow(grid))) {
+    candidates[[i]] <- make_candidate(
+      method = "CEVAM-T",
+      p0 = p0,
+      p1 = p1,
+      looks = looks,
+      N = N,
+      alpha_star = alpha_star,
+      alpha_eff = grid$alpha_eff[i],
+      beta = grid$beta[i]
+    )
+  }
+
+  choose_cevam_candidate(
+    candidates,
+    alpha_star = alpha_star,
+    type1_tolerance = type1_tolerance,
+    label = "CEVAM-T"
+  )
 }
 
 # -----------------------------
-# Planned-look threshold calibration
-# -----------------------------
-# We use exact binomial probabilities over the chosen looks.
-# Thresholds are constrained to be at least 1 so that stopping still
-# corresponds to evidence in favor of the relevant alternative.
-
-candidate_eff_thresholds <- function(looks, p0, p1) {
-  vals <- 1
-  for (n in looks) {
-    x <- 0:n
-    vals <- c(vals, exp(log_lr_eff(x, n, p0, p1)))
-  }
-  sort(unique(vals[is.finite(vals) & vals >= 1]))
-}
-
-candidate_fut_thresholds <- function(looks, p0, p1) {
-  vals <- 1
-  for (n in looks) {
-    x <- 0:n
-    vals <- c(vals, exp(log_lr_fut(x, n, p0, p1)))
-  }
-  sort(unique(vals[is.finite(vals) & vals >= 1]))
-}
-
-calibrate_eff_threshold <- function(looks, p0, p1, alpha) {
-  cand <- candidate_eff_thresholds(looks, p0, p1)
-  for (A in cand) {
-    pe <- prob_ever_eff(looks, p = p0, p0 = p0, p1 = p1, A_eff = A)
-    if (pe <= alpha) {
-      return(list(A_eff = A, type1_error = pe))
-    }
-  }
-  stop("No efficacy threshold found. Expand candidates or check inputs.")
-}
-
-calibrate_fut_threshold <- function(looks, p0, p1, beta) {
-  cand <- candidate_fut_thresholds(looks, p0, p1)
-  for (A in cand) {
-    pf <- prob_ever_fut(looks, p = p1, p0 = p0, p1 = p1, A_fut = A)
-    if (pf <= beta) {
-      return(list(A_fut = A, type2_error = pf))
-    }
-  }
-  stop("No futility threshold found. Expand candidates or check inputs.")
-}
-
-# -----------------------------
-# Decision function
+# Run TREND re-analysis
 # -----------------------------
 
-classify_decision <- function(n, x, p0, p1, A_eff, A_fut) {
-  f_bd <- fut_boundary_at_n(n, p0, p1, A_fut)
-  e_bd <- eff_boundary_at_n(n, p0, p1, A_eff)
-
-  if (!is.na(e_bd) && x >= e_bd) {
-    return("Stop for efficacy")
-  }
-  if (!is.na(f_bd) && x <= f_bd) {
-    return("Stop for futility")
-  }
-  "Continue"
-}
-
-# -----------------------------
-# Run analysis
-# -----------------------------
-
-A_eff_fixed <- 1 / alpha
-A_fut_fixed <- 1 / beta
-
-fixed_table <- make_boundary_table(
-  looks = looks,
+nt <- calibrate_cevam_nt(
   p0 = p0,
   p1 = p1,
-  A_eff = A_eff_fixed,
-  A_fut = A_fut_fixed,
-  label = "CEVAM fixed threshold"
+  looks = looks,
+  N = N_max,
+  alpha_star = alpha_star,
+  beta0 = beta0,
+  alpha_eff_grid = alpha_eff_grid,
+  type1_tolerance = type1_tolerance
 )
 
-cal_eff <- calibrate_eff_threshold(looks, p0, p1, alpha)
-cal_fut <- calibrate_fut_threshold(looks, p0, p1, beta)
-
-calibrated_table <- make_boundary_table(
-  looks = looks,
+tuned <- calibrate_cevam_t(
   p0 = p0,
   p1 = p1,
-  A_eff = cal_eff$A_eff,
-  A_fut = cal_fut$A_fut,
-  label = "CEVAM planned-look calibrated"
+  looks = looks,
+  N = N_max,
+  alpha_star = alpha_star,
+  alpha_eff_grid = alpha_eff_grid,
+  beta_grid = beta_grid,
+  type1_tolerance = type1_tolerance
 )
 
-boundary_table <- rbind(fixed_table, calibrated_table)
+boundary_table <- rbind(
+  make_boundary_table(nt$design, looks),
+  make_boundary_table(tuned$design, looks)
+)
 
 reported_decision <- data.frame(
-  method = c("CEVAM fixed threshold", "CEVAM planned-look calibrated"),
+  method = c(nt$design$method, tuned$design$method),
   n = reported_n,
   x = reported_x,
   futility_boundary = c(
-    fut_boundary_at_n(reported_n, p0, p1, A_fut_fixed),
-    fut_boundary_at_n(reported_n, p0, p1, cal_fut$A_fut)
+    nt$design$futility_le[as.character(reported_n)],
+    tuned$design$futility_le[as.character(reported_n)]
   ),
   efficacy_boundary = c(
-    eff_boundary_at_n(reported_n, p0, p1, A_eff_fixed),
-    eff_boundary_at_n(reported_n, p0, p1, cal_eff$A_eff)
+    nt$design$efficacy_ge[as.character(reported_n)],
+    tuned$design$efficacy_ge[as.character(reported_n)]
   ),
   decision = c(
-    classify_decision(reported_n, reported_x, p0, p1, A_eff_fixed, A_fut_fixed),
-    classify_decision(reported_n, reported_x, p0, p1, cal_eff$A_eff, cal_fut$A_fut)
+    classify_decision(reported_n, reported_x, nt$design, N_max),
+    classify_decision(reported_n, reported_x, tuned$design, N_max)
   ),
   stringsAsFactors = FALSE
 )
 
+reported_decision$decision <- ifelse(
+  reported_decision$decision == "efficacy",
+  "Stop for efficacy",
+  ifelse(
+    reported_decision$decision == "futility",
+    "Stop for futility",
+    ifelse(reported_decision$decision == "no_reject", "No rejection", "Continue")
+  )
+)
+
 oc_summary <- data.frame(
-  method = c("CEVAM fixed threshold", "CEVAM planned-look calibrated"),
-  A_eff = c(A_eff_fixed, cal_eff$A_eff),
-  A_fut = c(A_fut_fixed, cal_fut$A_fut),
-  type1_error_under_p0 = c(
-    prob_ever_eff(looks, p = p0, p0 = p0, p1 = p1, A_eff = A_eff_fixed),
-    cal_eff$type1_error
-  ),
-  type2_error_under_p1 = c(
-    prob_ever_fut(looks, p = p1, p0 = p0, p1 = p1, A_fut = A_fut_fixed),
-    cal_fut$type2_error
-  ),
+  method = c(nt$design$method, tuned$design$method),
+  alpha_star = alpha_star,
+  alpha_eff = c(nt$design$alpha_eff, tuned$design$alpha_eff),
+  beta = c(nt$design$beta, tuned$design$beta),
+  type1_at_p0 = c(nt$oc_null$reject, tuned$oc_null$reject),
+  power_at_p1 = c(nt$oc_alt$reject, tuned$oc_alt$reject),
+  ETF_at_p0 = c(nt$oc_null$ETF, tuned$oc_null$ETF),
+  ETE_at_p0 = c(nt$oc_null$ETE, tuned$oc_null$ETE),
+  PET_at_p0 = c(nt$oc_null$PET, tuned$oc_null$PET),
+  EN_at_p0 = c(nt$oc_null$EN, tuned$oc_null$EN),
+  ETF_at_p1 = c(nt$oc_alt$ETF, tuned$oc_alt$ETF),
+  ETE_at_p1 = c(nt$oc_alt$ETE, tuned$oc_alt$ETE),
+  PET_at_p1 = c(nt$oc_alt$PET, tuned$oc_alt$PET),
+  EN_at_p1 = c(nt$oc_alt$EN, tuned$oc_alt$EN),
   stringsAsFactors = FALSE
 )
 
 cat("\nTREND setting\n")
-cat("p0 =", p0, ", p1 =", p1, ", alpha =", alpha, ", beta =", beta, "\n")
+cat("p0 =", p0, ", p1 =", p1,
+    ", alpha_star =", alpha_star,
+    ", beta0 =", beta0, "\n")
+cat("Type I tolerance =", type1_tolerance, "\n")
 cat("Maximum sample size N =", N_max, "\n")
 cat("Looks used for this re-analysis:", paste(looks, collapse = ", "), "\n\n")
 
@@ -326,6 +393,6 @@ cat("\nOperating-characteristic summary over the chosen looks\n")
 print(oc_summary, row.names = FALSE)
 
 # Optional: write CSV outputs
-write.csv(boundary_table, "cevam_trend_boundary_table.csv", row.names = FALSE)
-write.csv(reported_decision, "cevam_trend_reported_decision.csv", row.names = FALSE)
-write.csv(oc_summary, "cevam_trend_oc_summary.csv", row.names = FALSE)
+write.csv(boundary_table, paste0(output_prefix, "_binary_boundaries.csv"), row.names = FALSE)
+write.csv(reported_decision, paste0(output_prefix, "_reported_decision.csv"), row.names = FALSE)
+write.csv(oc_summary, paste0(output_prefix, "_oc_summary.csv"), row.names = FALSE)
