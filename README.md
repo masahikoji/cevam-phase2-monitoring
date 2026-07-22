@@ -1,100 +1,139 @@
-# Globally calibrated enrichment BOP2: reproducibility code
+# CEVAM phase II monitoring code
 
-This repository reproduces the binary-endpoint analyses in the main manuscript and the complex-endpoint analyses in the Supplementary Material.
+This repository contains R code for boundary construction and operating-characteristic simulations for **calibrated e-value monitoring (CEVAM)** in benchmark-based early-phase oncology trials.
 
-The implementation uses the **no-bridging rule**: when the all-comer futility boundary is crossed with fewer than 10 biomarker-positive patients available, the trial stops rather than accruing additional patients solely to reach the minimum subgroup sample size.
+The code reproduces the boundary tables and simulation studies used for the manuscript:
 
-## Designs compared
+> Likelihood-Ratio E-Value Monitoring for Benchmark-Based Decisions in Early-Phase Oncology Trials
 
-### Proposed design
+## Files
 
-The all-comer and biomarker-positive boundary systems are jointly calibrated for the complete branching adaptive procedure. The calibration criterion controls
-
-\[
-\Pr(R_A \cup R_+)
-\]
-
-under the prespecified point global null over the biomarker-prevalence grid.
-
-### Comparator
-
-The comparator consists of independently calibrated conventional BOP2 components:
-
-1. A conventional all-comer BOP2 is calibrated for analyses at 20, 30, and 40 patients.
-2. For each attainable biomarker-positive entry sample size \(m=10,\ldots,30\), a conventional positive-population BOP2 is calibrated for the schedule consisting of \(m\), any subsequent scheduled analyses among 20 and 30 patients, and the final analysis at 40 patients.
-3. For each standalone BOP2, candidates with type I error no greater than 0.10 are considered first; the attainable type I error closest to 0.10 is selected, and power is used to resolve ties.
-4. The fixed standalone boundaries are then embedded in the no-bridging adaptive enrichment procedure. No constraint is imposed on the union probability \(\Pr(R_A\cup R_+)\) for the comparator.
+| File | Purpose |
+|---|---|
+| `phase2_design_core.R` | Core functions for BOP2-F, BOP2-FE, CEVAM boundary construction, exact operating-characteristic calculations, workbook I/O, and simulation helpers. |
+| `generate_phase2_boundaries.R` | Generates pretabulated boundary workbooks. This is the main entry point for boundary construction. |
+| `simulate_phase2_from_boundaries.R` | Reads a boundary workbook and evaluates operating characteristics. It does not recalibrate boundaries. |
+| `simulate_phase2_optional_monitoring.R` | Operational-flexibility simulation for additional reviews and optional continuation. |
+| `examples/trend_binary_boundaries.R` | Standalone binary CEVAM boundary calculation for the TREND trial application. |
 
 ## Requirements
 
-- R 4.2 or later
-- Base R packages for the analyses
-- Optional: `writexl` or `openxlsx` for consolidated Excel workbooks
+The scripts require R and the `openxlsx` package.
 
-Run commands from the repository root.
-
-```bash
-Rscript run_main.R
-Rscript run_supplement.R
+```r
+install.packages("openxlsx")
 ```
 
-To reproduce everything:
+No package installation is otherwise required; scripts can be run directly with `source()` or `Rscript`.
+
+## Quick start
+
+Generate the main boundary workbook using the default adaptive grid search:
 
 ```bash
-Rscript run_all.R
+Rscript generate_phase2_boundaries.R --out=results/phase2_boundaries.xlsx
 ```
 
-Parallel workers can be specified as follows:
+Run the main simulation from the generated workbook:
 
 ```bash
-BOP2_N_CORES=4 Rscript run_all.R
+Rscript simulate_phase2_from_boundaries.R \
+  --xlsx=results/phase2_boundaries.xlsx \
+  --out=results/phase2_simulation_results.xlsx \
+  --nsim=10000
 ```
 
-## Main manuscript: binary endpoint
-
-`R/01_main_binary_exact.R` performs exact recursive enumeration and writes results to `results/main/`.
-
-Important outputs include:
-
-- `exact_operating_characteristics.csv`
-- `exact_type1_error.csv`
-- `exact_power.csv`
-- `selected_designs.csv`
-- `proposed_boundary_table_allcomer.csv`
-- `proposed_boundary_table_positive.csv`
-- `comparator_allcomer_bop2_boundary.csv`
-- `comparator_positive_bop2_library.csv`
-- `enrichment_bop2_exact_results.xlsx` when an Excel-writing package is installed
-
-`R/02_main_tables.R` converts these results to LaTeX tables in `tables/main/`.
-
-## Supplementary Material: complex categorical endpoints
-
-`R/03_supp_complex_type1.R` performs simulation-based calibration and independent validation for:
-
-- nested efficacy;
-- co-primary efficacy; and
-- joint efficacy--toxicity monitoring.
-
-The proposed design is globally calibrated. The comparator uses an independently calibrated conventional all-comer BOP2 and an entry-specific library of conventional positive-population BOP2 designs. The script also writes both proposed and comparator boundary outputs to `results/supplement/`.
-
-`R/04_supp_tables.R` creates the corresponding LaTeX tables in `tables/supplement/`, including the standalone comparator boundary tables.
-
-## Quick code checks
-
-The reduced settings below are intended only to check code execution. They do not reproduce manuscript results.
+Run exact operating-characteristic evaluation instead of Monte Carlo where supported:
 
 ```bash
-BOP2_QUICK=1 Rscript run_main.R
-BOP2_COMPLEX_QUICK=1 Rscript run_supplement.R
+Rscript simulate_phase2_from_boundaries.R \
+  --xlsx=results/phase2_boundaries.xlsx \
+  --out=results/phase2_simulation_results_exact.xlsx \
+  --use_exact=true
 ```
 
-The complex-endpoint Monte Carlo replicate counts can be overridden:
+## Choosing methods for boundary construction
+
+Some complex-endpoint methods, especially joint likelihood-ratio variants, can take time to calibrate.  Boundary generation therefore allows method selection.
+
+Fast boundary generation for the main paper methods only:
 
 ```bash
-BOP2_COMPLEX_N_CALIB=50000 BOP2_COMPLEX_N_VALID=100000 Rscript run_supplement.R
+Rscript generate_phase2_boundaries.R \
+  --out=results/phase2_boundaries_main.xlsx \
+  --methods_binary=BOP2-F,BOP2-FE-1,BOP2-FE-2,CEVAM-NT,CEVAM-T \
+  --methods_projected=BOP2-F,BOP2-FE-1,BOP2-FE-2,CEVAM-NT,CEVAM-T \
+  --include_component_specific=false \
+  --include_joint_lr=false
 ```
 
-## Output mapping
+Include the component-specific CEVAM sensitivity design:
 
-See `MANUSCRIPT_OUTPUTS.md` for the mapping between manuscript tables and generated files. Generated result and table files are excluded by `.gitignore`; the directory placeholders are retained.
+```bash
+Rscript generate_phase2_boundaries.R \
+  --out=results/phase2_boundaries_component_specific.xlsx \
+  --methods_projected=BOP2-F,BOP2-FE-1,BOP2-FE-2,CEVAM-NT,CEVAM-T,CEVAM-CS-T
+```
+
+Include the joint likelihood-ratio sensitivity designs only when needed:
+
+```bash
+Rscript generate_phase2_boundaries.R \
+  --out=results/phase2_boundaries_with_jlr.xlsx \
+  --methods_projected=BOP2-F,BOP2-FE-1,BOP2-FE-2,CEVAM-NT,CEVAM-T,CEVAM-JLR,CEVAM-JLR-T
+```
+
+Available binary methods:
+
+```text
+BOP2-F, BOP2-FE-1, BOP2-FE-2, CEVAM-NT, CEVAM-T, CEVAM-Mix-NT, CEVAM-Mix-T
+```
+
+Available projected/complex-endpoint methods:
+
+```text
+BOP2-F, BOP2-FE-1, BOP2-FE-2, CEVAM-NT, CEVAM-T,
+CEVAM-CS-T, CEVAM-JLR, CEVAM-JLR-T, CEVAM-Mix-NT, CEVAM-Mix-T
+```
+
+## Reproducibility settings
+
+The default boundary script uses `default_search_grids(search_mode = "adaptive")`, which is faster than the exhaustive paper grid.  To use the exhaustive grid:
+
+```bash
+Rscript generate_phase2_boundaries.R \
+  --out=results/phase2_boundaries_paper_grid.xlsx \
+  --search_mode=paper
+```
+
+Parallel execution can be controlled with:
+
+```bash
+Rscript generate_phase2_boundaries.R \
+  --out=results/phase2_boundaries.xlsx \
+  --n_cores=8 \
+  --parallel_examples=true
+```
+
+When `parallel_examples=true`, the scripts avoid using many inner grid-search workers by default to reduce oversubscription.
+
+## TREND trial binary application
+
+The TREND trial application can be reproduced using:
+
+```bash
+Rscript examples/trend_binary_boundaries.R
+```
+
+The default settings are:
+
+```text
+p0 = 0.41, p1 = 0.56, N = 65, looks = 44 and 65,
+reported result: n = 44, x = 30 pCRs.
+```
+
+## Notes
+
+- `simulate_phase2_from_boundaries.R` does not recalibrate boundaries. It only reads the precomputed workbook.
+- `simulate_phase2_optional_monitoring.R` uses a clearly labeled carry-forward sensitivity rule for planned-look posterior-cutoff designs under extra reviews. The CEVAM anytime-valid rule recomputes fixed-threshold e-process boundaries at each actual review time.
+- Generated Excel and CSV outputs are ignored by `.gitignore` under `results/`.
