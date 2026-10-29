@@ -1,0 +1,13 @@
+List of 12
+ $ run_time      : chr "2026-09-14 15:16:33.917554"
+ $ mode          : chr "main"
+ $ base_dir      : chr "/Users/mk/Dropbox/Tex/03_Post_PhD/026_e-value/02_program/CEVAM_R_current"
+ $ output_dir    : chr "/Users/mk/Dropbox/Tex/03_Post_PhD/026_e-value/02_program/CEVAM_R_current/results_current"
+ $ nsim          : int 20000
+ $ joint_nsim    : int 10000
+ $ run_mc_all    : logi TRUE
+ $ run_joint_mc  : logi FALSE
+ $ run_adaptation: logi FALSE
+ $ n_cores       : int 27
+ $ R_version     : chr "R version 4.3.0 (2023-04-21)"
+ $ platform      : chr "aarch64-apple-darwin20"
